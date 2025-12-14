@@ -1,0 +1,231 @@
+# Build Speech Artifacts (STT/TTS)
+#
+# This workflow builds/downloads speech assets (sherpa-onnx STT, Supertonic TTS,
+# ONNX Runtime) per OS/arch, runs smoke tests, and uploads prepacked artifacts
+# for `speechctl` to install (codeccheck-style).
+#
+# Triggers:
+#   - Manual dispatch (workflow_dispatch)
+#   - Release creation
+#
+name: Build Speech Artifacts
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+  release:
+    types: [created]
+
+env:
+  ORT_VERSION: "1.22.0" # Align with yalue/onnxruntime_go in Supertonic; bump alongside wrapper
+  SHERPA_MODEL_URL: ""   # TODO: set to streaming conformer/paraformer model archive
+  SHERPA_TOKENS_URL: ""
+  SHERPA_LEXICON_URL: ""
+  SUPERTONIC_MODEL_URL: "" # TODO: set to Supertonic ONNX bundle
+  SUPERTONIC_VOICES_URL: "" # TODO: set to voices/presets bundle
+  CACHE_BASE: "~/.cache/speech"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+            flavor: cpu
+            ort_pkg: "onnxruntime-osx-universal2-${{ env.ORT_VERSION }}"
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            flavor: cpu
+            ort_pkg: "onnxruntime-linux-x64-${{ env.ORT_VERSION }}"
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            flavor: cpu
+            ort_pkg: "onnxruntime-linux-arm64-${{ env.ORT_VERSION }}"
+    runs-on: ${{ matrix.os }}
+    name: build-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Install git-lfs
+        run: |
+          git lfs install
+
+      - name: Prep cache dirs
+        run: |
+          mkdir -p ${{ env.CACHE_BASE }}/ort ${{ env.CACHE_BASE }}/models
+
+      - name: Cache ORT
+        uses: actions/cache@v4
+        id: cache-ort
+        with:
+          path: ${{ env.CACHE_BASE }}/ort/${{ matrix.ort_pkg }}
+          key: ort-${{ matrix.ort_pkg }}
+
+      - name: Download ONNX Runtime (CPU)
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ${{ env.CACHE_BASE }}/ort/${{ matrix.ort_pkg }}
+          cd ${{ env.CACHE_BASE }}/ort
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            curl -L -o ${{
+              matrix.ort_pkg
+            }}.zip https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/${{ matrix.ort_pkg }}.zip
+            unzip -o ${{ matrix.ort_pkg }}.zip -d ${{ matrix.ort_pkg }}
+          else
+            curl -L -o ${{ matrix.ort_pkg }}.tgz https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/${{ matrix.ort_pkg }}.tgz
+            tar -xzf ${{ matrix.ort_pkg }}.tgz -C ${{ matrix.ort_pkg }} --strip-components=1
+          fi
+
+      - name: Restore ORT to workspace
+        run: |
+          mkdir -p runtimes/ort
+          cp -R ${{ env.CACHE_BASE }}/ort/${{ matrix.ort_pkg }} runtimes/ort/
+
+      - name: Cache models
+        uses: actions/cache@v4
+        id: cache-models
+        with:
+          path: |
+            ${{ env.CACHE_BASE }}/models/stt
+            ${{ env.CACHE_BASE }}/models/tts
+          key: models-${{ matrix.goos }}-${{ matrix.goarch }}-${{ env.ORT_VERSION }}
+
+      - name: Download models (STT/TTS)
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ${{ env.CACHE_BASE }}/models/stt ${{ env.CACHE_BASE }}/models/tts
+          if [[ -n "${SHERPA_MODEL_URL}" ]]; then
+            curl -L "$SHERPA_MODEL_URL" -o ${{ env.CACHE_BASE }}/models/stt/model.zip
+            unzip -o ${{ env.CACHE_BASE }}/models/stt/model.zip -d ${{ env.CACHE_BASE }}/models/stt
+          else
+            echo "Skipping sherpa model download (SHERPA_MODEL_URL empty)"
+          fi
+          if [[ -n "${SHERPA_TOKENS_URL}" ]]; then
+            curl -L "$SHERPA_TOKENS_URL" -o ${{ env.CACHE_BASE }}/models/stt/tokens.txt
+          else
+            echo "Skipping sherpa tokens download (SHERPA_TOKENS_URL empty)"
+          fi
+          if [[ -n "${SHERPA_LEXICON_URL}" ]]; then
+            curl -L "$SHERPA_LEXICON_URL" -o ${{ env.CACHE_BASE }}/models/stt/lexicon.txt
+          else
+            echo "Skipping sherpa lexicon download (SHERPA_LEXICON_URL empty)"
+          fi
+          if [[ -n "${SUPERTONIC_MODEL_URL}" ]]; then
+            curl -L "$SUPERTONIC_MODEL_URL" -o ${{ env.CACHE_BASE }}/models/tts/tts.zip
+            unzip -o ${{ env.CACHE_BASE }}/models/tts/tts.zip -d ${{ env.CACHE_BASE }}/models/tts
+          else
+            echo "Skipping Supertonic model download (SUPERTONIC_MODEL_URL empty)"
+          fi
+          if [[ -n "${SUPERTONIC_VOICES_URL}" ]]; then
+            curl -L "$SUPERTONIC_VOICES_URL" -o ${{ env.CACHE_BASE }}/models/tts/voices.zip
+            unzip -o ${{ env.CACHE_BASE }}/models/tts/voices.zip -d ${{ env.CACHE_BASE }}/models/tts
+          fi
+
+      - name: Restore models to workspace
+        run: |
+          mkdir -p models/stt models/tts
+          cp -R ${{ env.CACHE_BASE }}/models/stt/* models/stt/ || true
+          cp -R ${{ env.CACHE_BASE }}/models/tts/* models/tts/ || true
+
+      - name: Smoke test (placeholder)
+        run: |
+          echo "TODO: run sherpa-onnx streaming test and Supertonic Go runner using bundled ORT/models"
+
+      - name: Build manifest
+        run: |
+          cat > manifest.json <<'EOF'
+          {
+            "ort_version": "${{ env.ORT_VERSION }}",
+            "goos": "${{ matrix.goos }}",
+            "goarch": "${{ matrix.goarch }}",
+            "flavor": "${{ matrix.flavor }}",
+            "models": {
+              "sherpa": "${SHERPA_MODEL_URL}",
+              "supertonic": "${SUPERTONIC_MODEL_URL}"
+            }
+          }
+          EOF
+
+      - name: Package artifact (tar.gz)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -czf dist/speech-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}.tar.gz runtimes models manifest.json
+
+      - name: Package artifact (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path runtimes,models,manifest.json -DestinationPath dist/speech-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}
+          path: |
+            dist/speech-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}.tar.gz
+            dist/speech-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}.zip
+          if-no-files-found: warn
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: |
+          find artifacts -type f || true
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*speech-*.tar.gz
+          fail_on_unmatched_files: false
+
+      - name: Create release from dispatch
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: speech-${{ github.event.inputs.version }}
+          name: Speech Artifacts ${{ github.event.inputs.version }}
+          body: |
+            Prebuilt speech artifacts (sherpa-onnx STT, Supertonic TTS, ONNX Runtime).
+
+            ## Platforms
+            - darwin-arm64 (cpu)
+            - linux-amd64 (cpu)
+            - linux-arm64 (cpu)
+            - windows-amd64 (cpu)
+
+            ## Usage
+            ```bash
+            speechctl stt install
+            speechctl tts install
+            ```
+          files: artifacts/**/*speech-*.tar.gz
+          fail_on_unmatched_files: false
