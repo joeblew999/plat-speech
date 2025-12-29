@@ -8,13 +8,14 @@ description: Speech recognition CLI (STT/TTS asset management)
 author: Gerard Webb
 license: MIT
 
-binary:
-  name: speechctl
-  source:
-    go: github.com/joeblew999/plat-speech/cmd/speechctl
+# Binary - commented out until go.mod is created
+# binary:
+#   name: speechctl
+#   source:
+#     go: github.com/joeblew999/plat-speech/cmd/speechctl
 
 # No long-running processes - CLI tool only
 
-dependencies:
-  build:
-    - go
+# dependencies:
+#   build:
+#     - go
