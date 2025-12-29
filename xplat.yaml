@@ -3,7 +3,7 @@ apiVersion: xplat/v1
 kind: Package
 
 name: speech
-version: latest
+version: main
 description: Speech recognition CLI (STT/TTS asset management)
 author: Gerard Webb
 license: MIT
